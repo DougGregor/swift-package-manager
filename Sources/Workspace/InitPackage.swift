@@ -45,6 +45,7 @@ public final class InitPackage {
         case executable = "executable"
         case tool = "tool"
         case `extension` = "extension"
+        case macro = "macro"
 
         public var description: String {
             return rawValue
@@ -190,6 +191,12 @@ public final class InitPackage {
                         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.2.0"),
                     ]
                 """)
+            } else if packageType == .macro {
+                pkgParams.append("""
+                    dependencies: [
+                        .package(url: "https://github.com/apple/swift-syntax.git", branch: "main"),
+                    ]
+                """)
             }
 
             // Package targets
@@ -217,6 +224,16 @@ public final class InitPackage {
                                     .product(name: "ArgumentParser", package: "swift-argument-parser"),
                                 ],
                                 path: "Sources"),
+                        ]
+                    """
+                } else if packageType == .macro {
+                    param += """
+                            .macro(name: "\(pkgname)Macros")
+                            .target(name: "\(pkgname)", dependencies: ["\(pkgname)Macros"]),
+                            .executableTarget(name: "\(pkgname)Client", dependencies: "\(pkgname)")
+                            .testTarget(
+                                name: "\(pkgname)MacroTests",
+                                dependencies: ["\(pkgname)Macros"]),
                         ]
                     """
                 } else {
@@ -331,6 +348,15 @@ public final class InitPackage {
                 }
             }
             """
+        case .macro:
+            content = """
+            // The Swift Programming Language
+            // https://docs.swift.org/swift-book
+
+            @freestanding(expression)
+            public macro stringify<T>(_ value: T) -> (T, String) = #externalMacro(module: "\(pkgname)Macros", type: "StringifyMacro")
+            """
+
         case .empty, .`extension`:
             throw InternalError("invalid packageType \(packageType)")
         }
@@ -374,6 +400,47 @@ public final class InitPackage {
         }
     }
 
+    private func writeMacroTestsFile(_ path: AbsolutePath) throws {
+        try writePackageFile(path) { stream in
+            stream <<< ##"""
+                import SwiftSyntax
+                import SwiftSyntaxBuilder
+                import SwiftSyntaxMacros
+                import XCTest
+                import \(pkgName)Macros
+
+                var testMacros: [String: Macro.Type] = [
+                  "stringify" : StringifyMacro.self,
+                ]
+
+                final class \(pkgName)Tests: XCTestCase {
+                  func testStringify() {
+                    // XCTest Documenation
+                    // https://developer.apple.com/documentation/xctest
+
+                    let sf: SourceFileSyntax =
+                      #"""
+                      let a = #stringify(x + y)
+                      let b = #stringify("Hello, \(name)")
+                      """#
+                    let context = BasicMacroExpansionContext.init(
+                      sourceFiles: [sf: .init(moduleName: "MyModule", fullFilePath: "test.swift")]
+                    )
+                    let transformedSF = sf.expand(macros: testMacros, in: context)
+                    XCTAssertEqual(
+                      transformedSF.description,
+                      #"""
+                      let a = (x + y, "x + y")
+                      let b = ("Hello, \(name)", #""Hello, \(name)""#)
+                      """#
+                    )
+                  }
+                }
+
+                """##
+        }
+    }
+
     private func writeTestFileStubs(testsPath: AbsolutePath) throws {
         let testModule = try AbsolutePath(validating: pkgname + Target.testModuleNameSuffix, relativeTo: testsPath)
         progressReporter?("Creating \(testModule.relative(to: destinationPath))/")
@@ -384,6 +451,8 @@ public final class InitPackage {
         case .empty, .`extension`, .executable, .tool: break
         case .library:
             try writeLibraryTestsFile(testClassFile)
+        case .macro:
+            try writeMacroTestsFile(testClassFile)
         }
     }
 }
